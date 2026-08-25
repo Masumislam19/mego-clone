@@ -1,6 +1,4 @@
 // ---- Config ----
-// Free public STUN server. For production at scale, you'll likely also need a TURN
-// server (not free) so calls work behind strict NATs/firewalls. See README.
 const ICE_SERVERS = {
   iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
 };
@@ -11,16 +9,21 @@ const callScreen = document.getElementById('call-screen');
 const interestsInput = document.getElementById('interests');
 const startBtn = document.getElementById('start-btn');
 const skipBtn = document.getElementById('skip-btn');
+const blockBtn = document.getElementById('block-btn');
+const reportBtn = document.getElementById('report-btn');
 const endBtn = document.getElementById('end-btn');
+const logoutBtn = document.getElementById('logout-btn');
 const localVideo = document.getElementById('local-video');
 const remoteVideo = document.getElementById('remote-video');
 const statusBadge = document.getElementById('status-badge');
+const usernameBadge = document.getElementById('username-badge');
+const remoteLabel = document.getElementById('remote-label');
 const chatForm = document.getElementById('chat-form');
 const chatInput = document.getElementById('chat-input');
 const chatMessages = document.getElementById('chat-messages');
 
 // ---- State ----
-const socket = io();
+let socket = null;
 let localStream = null;
 let peerConnection = null;
 let currentRoomId = null;
@@ -37,6 +40,28 @@ function addChatMessage(text, type) {
   chatMessages.appendChild(div);
   chatMessages.scrollTop = chatMessages.scrollHeight;
 }
+
+// ---- Auth check: redirect to login if not authenticated ----
+async function checkAuth() {
+  try {
+    const res = await fetch('/api/me');
+    if (!res.ok) {
+      window.location.href = '/login.html';
+      return null;
+    }
+    const data = await res.json();
+    usernameBadge.textContent = data.username;
+    return data;
+  } catch (err) {
+    window.location.href = '/login.html';
+    return null;
+  }
+}
+
+logoutBtn.addEventListener('click', async () => {
+  await fetch('/api/logout', { method: 'POST' });
+  window.location.href = '/login.html';
+});
 
 async function getLocalMedia() {
   localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
@@ -83,51 +108,58 @@ function cleanupCall() {
   }
   remoteVideo.srcObject = null;
   chatMessages.innerHTML = '';
+  remoteLabel.textContent = 'Stranger';
 }
 
-// ---- Socket events ----
-socket.on('waiting', () => {
-  setStatus('ম্যাচ খোঁজা হচ্ছে...', 'waiting');
-});
+function setupSocketListeners() {
+  socket.on('auth-required', () => {
+    window.location.href = '/login.html';
+  });
 
-socket.on('matched', async ({ roomId, initiator }) => {
-  currentRoomId = roomId;
-  setStatus('কানেক্ট হচ্ছে...', 'waiting');
-  addChatMessage('একজন Stranger-এর সাথে কানেক্ট হয়েছে!', 'system');
-  if (initiator) {
-    await startAsInitiator();
-  } else {
-    startAsReceiver();
-  }
-});
+  socket.on('waiting', () => {
+    setStatus('ম্যাচ খোঁজা হচ্ছে...', 'waiting');
+  });
 
-socket.on('signal', async ({ data }) => {
-  if (!peerConnection) return;
-  if (data.sdp) {
-    await peerConnection.setRemoteDescription(new RTCSessionDescription(data.sdp));
-    if (data.sdp.type === 'offer') {
-      const answer = await peerConnection.createAnswer();
-      await peerConnection.setLocalDescription(answer);
-      socket.emit('signal', { roomId: currentRoomId, data: { sdp: answer } });
+  socket.on('matched', async ({ roomId, initiator, partnerName }) => {
+    currentRoomId = roomId;
+    setStatus('কানেক্ট হচ্ছে...', 'waiting');
+    remoteLabel.textContent = partnerName || 'Stranger';
+    addChatMessage(`${partnerName || 'একজন Stranger'}-এর সাথে কানেক্ট হয়েছে!`, 'system');
+    if (initiator) {
+      await startAsInitiator();
+    } else {
+      startAsReceiver();
     }
-  } else if (data.candidate) {
-    try {
-      await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
-    } catch (err) {
-      console.error('Error adding ICE candidate', err);
+  });
+
+  socket.on('signal', async ({ data }) => {
+    if (!peerConnection) return;
+    if (data.sdp) {
+      await peerConnection.setRemoteDescription(new RTCSessionDescription(data.sdp));
+      if (data.sdp.type === 'offer') {
+        const answer = await peerConnection.createAnswer();
+        await peerConnection.setLocalDescription(answer);
+        socket.emit('signal', { roomId: currentRoomId, data: { sdp: answer } });
+      }
+    } else if (data.candidate) {
+      try {
+        await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+      } catch (err) {
+        console.error('Error adding ICE candidate', err);
+      }
     }
-  }
-});
+  });
 
-socket.on('partner-left', () => {
-  addChatMessage('Stranger চলে গেছে। নতুন ম্যাচ খোঁজা হচ্ছে...', 'system');
-  cleanupCall();
-  setStatus('ম্যাচ খোঁজা হচ্ছে...', 'waiting');
-});
+  socket.on('partner-left', () => {
+    addChatMessage('Stranger চলে গেছে। নতুন ম্যাচ খোঁজা হচ্ছে...', 'system');
+    cleanupCall();
+    setStatus('ম্যাচ খোঁজা হচ্ছে...', 'waiting');
+  });
 
-socket.on('chat-message', ({ message }) => {
-  addChatMessage(message, 'other');
-});
+  socket.on('chat-message', ({ message }) => {
+    addChatMessage(message, 'other');
+  });
+}
 
 // ---- UI events ----
 startBtn.addEventListener('click', async () => {
@@ -139,6 +171,9 @@ startBtn.addEventListener('click', async () => {
   }
   setupScreen.classList.add('hidden');
   callScreen.classList.remove('hidden');
+
+  socket = io();
+  setupSocketListeners();
 
   const interests = interestsInput.value
     .split(',')
@@ -154,10 +189,26 @@ skipBtn.addEventListener('click', () => {
   socket.emit('skip');
 });
 
+blockBtn.addEventListener('click', () => {
+  if (!confirm('এই ইউজারকে Block করতে চান? আর কখনো তার সাথে ম্যাচ হবে না।')) return;
+  socket.emit('block-partner');
+  cleanupCall();
+  addChatMessage('ইউজার ব্লক করা হয়েছে। নতুন ম্যাচ খোঁজা হচ্ছে...', 'system');
+  setStatus('ম্যাচ খোঁজা হচ্ছে...', 'waiting');
+  socket.emit('skip');
+});
+
+reportBtn.addEventListener('click', () => {
+  const reason = prompt('কেন রিপোর্ট করছেন? (কারণ লিখুন — যেমন: harassment, inappropriate content)');
+  if (reason === null) return; // cancelled
+  socket.emit('report-partner', reason);
+  addChatMessage('রিপোর্ট পাঠানো হয়েছে। ধন্যবাদ।', 'system');
+});
+
 endBtn.addEventListener('click', () => {
   cleanupCall();
   if (localStream) localStream.getTracks().forEach((t) => t.stop());
-  socket.disconnect();
+  if (socket) socket.disconnect();
   callScreen.classList.add('hidden');
   setupScreen.classList.remove('hidden');
   setStatus('অফলাইন', 'idle');
@@ -171,3 +222,6 @@ chatForm.addEventListener('submit', (e) => {
   addChatMessage(text, 'self');
   chatInput.value = '';
 });
+
+// ---- Init ----
+checkAuth();
