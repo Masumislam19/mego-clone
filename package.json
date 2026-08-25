@@ -1,7 +1,7 @@
 {
   "name": "mego-clone",
   "version": "1.0.0",
-  "description": "Random/interest-based video chat MVP (Mego-style) - WebRTC + Socket.IO",
+  "description": "Random/interest-based video chat MVP (Mego-style) - WebRTC + Socket.IO + Auth",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -9,7 +9,10 @@
   },
   "dependencies": {
     "express": "^4.19.2",
-    "socket.io": "^4.7.5"
+    "socket.io": "^4.7.5",
+    "express-session": "^1.18.0",
+    "bcryptjs": "^2.4.3",
+    "better-sqlite3": "^11.3.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.4"
