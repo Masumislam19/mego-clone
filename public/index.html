@@ -10,7 +10,11 @@
 
 <header>
   <h1>MegoClone</h1>
-  <span id="status-badge" class="status idle">অফলাইন</span>
+  <div class="header-right">
+    <span id="username-badge" class="username-badge"></span>
+    <span id="status-badge" class="status idle">অফলাইন</span>
+    <button id="logout-btn" class="btn-logout">Logout</button>
+  </div>
 </header>
 
 <main>
@@ -29,12 +33,14 @@
       </div>
       <div class="video-wrap">
         <video id="remote-video" autoplay playsinline></video>
-        <span class="label">Stranger</span>
+        <span class="label" id="remote-label">Stranger</span>
       </div>
     </div>
 
     <div class="controls">
       <button id="skip-btn" class="btn-secondary">পরবর্তী ⏭</button>
+      <button id="block-btn" class="btn-warning">Block 🚫</button>
+      <button id="report-btn" class="btn-warning">Report ⚠️</button>
       <button id="end-btn" class="btn-danger">শেষ করুন</button>
     </div>
 
