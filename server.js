@@ -1,17 +1,23 @@
 /**
- * Mego-style video chat MVP server
+ * Mego-style video chat MVP server — now with auth + block/report
  * - Serves the frontend (public/)
- * - Handles matchmaking (interest-based, falls back to random)
+ * - Email/password auth (sessions via express-session)
+ * - Handles matchmaking (interest-based, falls back to random), skipping blocked users
  * - Relays WebRTC signaling (offer/answer/ICE candidates)
  * - Relays text chat messages between matched pairs
+ * - Block + Report a partner (persisted in SQLite)
  *
  * Run: npm install && npm start
  */
 
 const express = require('express');
 const http = require('http');
-const { Server } = require('socket.io');
 const path = require('path');
+const session = require('express-session');
+const { Server } = require('socket.io');
+
+const db = require('./db');
+const authRoutes = require('./auth');
 
 const app = express();
 const server = http.createServer(app);
@@ -19,47 +25,84 @@ const io = new Server(server, {
   cors: { origin: '*' } // tighten this in production to your real domain
 });
 
-app.use(express.static(path.join(__dirname, 'public')));
+// ---- Session setup (shared between Express routes and Socket.IO) ----
+// Set SESSION_SECRET as an environment variable in production (e.g. on Render).
+const sessionMiddleware = session({
+  secret: process.env.SESSION_SECRET || 'dev-secret-change-this-in-production',
+  resave: false,
+  saveUninitialized: false,
+  cookie: { maxAge: 1000 * 60 * 60 * 24 * 7 } // 7 days
+});
 
-// ---- In-memory state (fine for MVP; use Redis if you scale to multiple server instances) ----
+app.use(express.json());
+app.use(sessionMiddleware);
+io.engine.use(sessionMiddleware); // lets Socket.IO read the same session/cookie
 
-// Users waiting to be matched: array of { socketId, interests: string[] }
+app.use('/api', authRoutes);
+
+// Serve CSS/JS assets, but don't auto-serve index.html (we gate it below)
+app.use(express.static(path.join(__dirname, 'public'), { index: false }));
+
+app.get('/login.html', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'login.html'));
+});
+
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// ---- In-memory matchmaking state ----
+// { socketId, userId, username, interests }
 let waitingQueue = [];
+const activePairs = new Map(); // socketId -> partnerSocketId
+const userProfiles = new Map(); // socketId -> profile
 
-// Map socketId -> partnerSocketId, so we know who is paired with whom
-const activePairs = new Map();
-
-// Map socketId -> { interests }
-const userProfiles = new Map();
+function isBlocked(userIdA, userIdB) {
+  const row = db
+    .prepare(
+      'SELECT 1 FROM blocks WHERE (blocker_id = ? AND blocked_id = ?) OR (blocker_id = ? AND blocked_id = ?)'
+    )
+    .get(userIdA, userIdB, userIdB, userIdA);
+  return !!row;
+}
 
 function removeFromQueue(socketId) {
   waitingQueue = waitingQueue.filter((u) => u.socketId !== socketId);
 }
 
 function findMatch(newUser) {
-  // 1. Try to find someone with at least one shared interest tag
+  const candidates = waitingQueue.filter((u) => !isBlocked(u.userId, newUser.userId));
+
   if (newUser.interests && newUser.interests.length > 0) {
-    const idx = waitingQueue.findIndex((u) =>
+    const idx = candidates.findIndex((u) =>
       u.interests.some((tag) => newUser.interests.includes(tag))
     );
-    if (idx !== -1) return waitingQueue.splice(idx, 1)[0];
+    if (idx !== -1) {
+      const match = candidates[idx];
+      removeFromQueue(match.socketId);
+      return match;
+    }
   }
-  // 2. Fall back to random: just take whoever has been waiting longest
-  if (waitingQueue.length > 0) return waitingQueue.shift();
+
+  if (candidates.length > 0) {
+    const match = candidates[0];
+    removeFromQueue(match.socketId);
+    return match;
+  }
+
   return null;
 }
 
-function pairUsers(socketA, socketB) {
-  activePairs.set(socketA, socketB);
-  activePairs.set(socketB, socketA);
+function pairUsers(a, b) {
+  activePairs.set(a.socketId, b.socketId);
+  activePairs.set(b.socketId, a.socketId);
 
-  const roomId = `room_${socketA}_${socketB}`;
-  io.sockets.sockets.get(socketA)?.join(roomId);
-  io.sockets.sockets.get(socketB)?.join(roomId);
+  const roomId = `room_${a.socketId}_${b.socketId}`;
+  io.sockets.sockets.get(a.socketId)?.join(roomId);
+  io.sockets.sockets.get(b.socketId)?.join(roomId);
 
-  // Tell socketA to be the "initiator" (creates the WebRTC offer)
-  io.to(socketA).emit('matched', { roomId, initiator: true });
-  io.to(socketB).emit('matched', { roomId, initiator: false });
+  io.to(a.socketId).emit('matched', { roomId, initiator: true, partnerName: b.username });
+  io.to(b.socketId).emit('matched', { roomId, initiator: false, partnerName: a.username });
 }
 
 function handleDisconnectOrSkip(socketId) {
@@ -73,50 +116,81 @@ function handleDisconnectOrSkip(socketId) {
 }
 
 io.on('connection', (socket) => {
-  console.log(`connected: ${socket.id}`);
+  const httpSession = socket.request.session;
 
-  // Client sends their chosen interest tags (can be empty array for pure random match)
+  // Reject any socket that doesn't have a valid logged-in session
+  if (!httpSession || !httpSession.userId) {
+    socket.emit('auth-required');
+    socket.disconnect(true);
+    return;
+  }
+
+  const userId = httpSession.userId;
+  const username = httpSession.username;
+
   socket.on('find-match', (interests = []) => {
-    userProfiles.set(socket.id, { interests });
-    handleDisconnectOrSkip(socket.id); // clean up any previous state
+    const me = { socketId: socket.id, userId, username, interests };
+    userProfiles.set(socket.id, me);
+    handleDisconnectOrSkip(socket.id);
 
-    const partner = findMatch({ socketId: socket.id, interests });
+    const partner = findMatch(me);
     if (partner) {
-      pairUsers(socket.id, partner.socketId);
+      pairUsers(me, partner);
     } else {
-      waitingQueue.push({ socketId: socket.id, interests });
+      waitingQueue.push(me);
       socket.emit('waiting');
     }
   });
 
-  // --- WebRTC signaling relay: just forward to the partner ---
-  socket.on('signal', ({ roomId, data }) => {
+  socket.on('signal', ({ data }) => {
     const partnerId = activePairs.get(socket.id);
     if (partnerId) io.to(partnerId).emit('signal', { data });
   });
 
-  // --- Text chat relay ---
   socket.on('chat-message', (message) => {
     const partnerId = activePairs.get(socket.id);
-    if (partnerId) io.to(partnerId).emit('chat-message', { message, fromSelf: false });
+    if (partnerId) io.to(partnerId).emit('chat-message', { message });
   });
 
-  // User clicks "Next" / "Skip"
   socket.on('skip', () => {
     handleDisconnectOrSkip(socket.id);
-    // Immediately try to find a new match with their last-used interests
-    const profile = userProfiles.get(socket.id) || { interests: [] };
-    const partner = findMatch({ socketId: socket.id, interests: profile.interests });
+    const profile = userProfiles.get(socket.id) || { socketId: socket.id, userId, username, interests: [] };
+    const partner = findMatch(profile);
     if (partner) {
-      pairUsers(socket.id, partner.socketId);
+      pairUsers(profile, partner);
     } else {
-      waitingQueue.push({ socketId: socket.id, interests: profile.interests });
+      waitingQueue.push(profile);
       socket.emit('waiting');
     }
   });
 
+  // Block the current partner: saved to DB so they'll never be matched again
+  socket.on('block-partner', () => {
+    const partnerId = activePairs.get(socket.id);
+    const partnerProfile = userProfiles.get(partnerId);
+    if (partnerProfile) {
+      db.prepare('INSERT OR IGNORE INTO blocks (blocker_id, blocked_id) VALUES (?, ?)').run(
+        userId,
+        partnerProfile.userId
+      );
+    }
+    handleDisconnectOrSkip(socket.id);
+  });
+
+  // Report the current partner: logged to DB with an optional reason
+  socket.on('report-partner', (reason) => {
+    const partnerId = activePairs.get(socket.id);
+    const partnerProfile = userProfiles.get(partnerId);
+    if (partnerProfile) {
+      db.prepare('INSERT INTO reports (reporter_id, reported_id, reason) VALUES (?, ?, ?)').run(
+        userId,
+        partnerProfile.userId,
+        reason || ''
+      );
+    }
+  });
+
   socket.on('disconnect', () => {
-    console.log(`disconnected: ${socket.id}`);
     handleDisconnectOrSkip(socket.id);
     userProfiles.delete(socket.id);
   });
