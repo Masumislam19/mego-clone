@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>MegoClone — Live Video Chat</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<header>
+  <h1>MegoClone</h1>
+  <span id="status-badge" class="status idle">অফলাইন</span>
+</header>
+
+<main>
+  <section id="setup-screen" class="panel">
+    <h2>শুরু করার আগে</h2>
+    <label for="interests">Interest tags (comma দিয়ে আলাদা করুন, না দিলে random match হবে)</label>
+    <input id="interests" type="text" placeholder="music, travel, tech" />
+    <button id="start-btn">ভিডিও চ্যাট শুরু করুন</button>
+  </section>
+
+  <section id="call-screen" class="panel hidden">
+    <div class="video-grid">
+      <div class="video-wrap">
+        <video id="local-video" autoplay muted playsinline></video>
+        <span class="label">তুমি</span>
+      </div>
+      <div class="video-wrap">
+        <video id="remote-video" autoplay playsinline></video>
+        <span class="label">Stranger</span>
+      </div>
+    </div>
+
+    <div class="controls">
+      <button id="skip-btn" class="btn-secondary">পরবর্তী ⏭</button>
+      <button id="end-btn" class="btn-danger">শেষ করুন</button>
+    </div>
+
+    <div class="chat-box">
+      <div id="chat-messages" class="chat-messages"></div>
+      <form id="chat-form">
+        <input id="chat-input" type="text" placeholder="মেসেজ লিখুন..." autocomplete="off" />
+        <button type="submit">Send</button>
+      </form>
+    </div>
+  </section>
+</main>
+
+<script src="/socket.io/socket.io.js"></script>
+<script src="client.js"></script>
+</body>
+</html>
