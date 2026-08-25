@@ -20,7 +20,7 @@ header h1 { font-size: 22px; }
 
 main { max-width: 900px; margin: 0 auto; padding: 24px; }
 .panel { background: #1a1a22; border-radius: 16px; padding: 24px; }
-.hidden { display: none; }
+.hidden { display: none !important; }
 
 #setup-screen label { display: block; margin-bottom: 8px; color: #aaa; font-size: 14px; }
 #setup-screen input {
